@@ -8,17 +8,18 @@ from umqtt.simple import MQTTClient
 import ujson
 import gc
 import ubinascii
-import asyncio
 import sys
 import dht
 import ntptime
-
+import ds18x20
+import onewire
 
 
 print("Free memory before connecting to WiFi:", gc.mem_free())
 global WIFI_SSID, WIFI_PASSWORD, MQTT_BROKER, MQTT_USERNAME, MQTT_PASSWORD, SLEEP_DURATION
 # WiFi and MQTT Configuration
 CONFIG_FILE = 'config.json'
+
 
 MQTT_PORT = 1883
 MQTT_CLIENT_ID = "esp32c3_moisture_sensor"
@@ -41,6 +42,14 @@ LED_PWR_PIN = 7
 LED_BLUE_PIN = 6
 LED_GREEN_PIN = 10
 
+SOIL_TEMP_PWR_PIN = 20
+SOIL_TEMP_DATA_PIN = 5
+
+
+min_update = 6
+
+# Sleep duration in seconds (1 hour)
+#SLEEP_DURATION = 3600
 
 def connect_to_wifi(WIFI_SSID,WIFI_PASSWORD):
     global Connecting
@@ -535,6 +544,20 @@ def led_off():
     LED_BLUE.value(0)
     LED_PWR.value(0)
     
+def get_soil_temp():
+    #adc = ADC(Pin(SOIL_TEMP_DATA_PIN))
+    #adc.init(atten=ADC.ATTN_11DB)
+    #soil_temp_value = adc.read()
+    
+    ds_pin = machine.Pin(SOIL_TEMP_DATA_PIN)
+    ds_sensor = ds18x20.DS18X20(onewire.OneWire(ds_pin))
+    ds_sensor.convert_temp()
+    time.sleep_ms(750)
+    roms = ds_sensor.scan()
+    for rom in roms:
+        temp_value = ds_sensor.read_temp(rom)
+        soil_temp_value = (temp_value * (9/5) + 32)
+    return soil_temp_value
     
 def main():
     button_pin = machine.Pin(9, machine.Pin.IN)
@@ -556,6 +579,8 @@ def main():
     print("Boot Count:", boot_count)
     print('Powering on sensors...')
     MOISTURE_PWR = machine.Pin(MOISTURE_PWR_PIN, machine.Pin.OUT)
+    SOIL_TEMP_PWR = machine.Pin(SOIL_TEMP_PWR_PIN, machine.Pin.OUT)
+    SOIL_TEMP_PWR.value(1)
     MOISTURE_PWR.value(1)
    # LIGHT_PWR = machine.Pin(LIGHT_PWR_PIN, machine.Pin.OUT)
     #LIGHT_PWR.value(1)
@@ -614,6 +639,16 @@ def main():
         print("Current Humidity:", humidity_current, " %")
         bootcount_prev = get_bootcount_prev()
         tracker = boot_count - bootcount_prev
+        
+        #Soil Temperature
+        #light_percentage_previous = get_prev_light()
+        #print("Initial Light Percentage:", light_percentage_previous, " %")
+        current_soil_temp = get_soil_temp()
+        #normalized_light_value = current_light / 4095
+        #light_percentage_current = round(normalized_light_value *100, 2)
+        #print("Current Light Percentage:", light_percentage_current, " %")
+        print("Current Soil Temperature:", current_soil_temp, " °F")
+        
         if tracker >= min_update or abs(moisture_percentage_current - moisture_percentage_previous) >= (3):
             print("Updating Server...")
             connect_to_wifi(WIFI_SSID,WIFI_PASSWORD)
@@ -693,6 +728,7 @@ def main():
             client.disconnect()
             disconnect_from_wifi()
         
+        SOIL_TEMP_PWR.value(0)
         MOISTURE_PWR.value(0)
         #LIGHT_PWR.value(0)
         led_off()
