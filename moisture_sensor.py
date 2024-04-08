@@ -1,9 +1,8 @@
 import machine
-from machine import Pin, ADC
+from machine import Pin, ADC, PWM
 import network
 import usocket
 import time
-from machine import Pin, ADC
 from umqtt.simple import MQTTClient
 import ujson
 import gc
@@ -28,6 +27,7 @@ MQTT_TOPIC = "tele/sensor/moisture_sensor/state"
 MQTT_LIGHT_TOPIC = "tele/sensor/light_sensor/state"
 MQTT_AIR_TEMP_TOPIC = "tele/sensor/air_temp_sensor/state"
 MQTT_HUMIDITY_TOPIC = "tele/sensor/humidity_sensor/state"
+MQTT_BATTERY_TOPIC = "tele/sensor/battery_sensor/state"
 
 # Analog pin assignment
 MOISTURE_SENSOR_PIN = 3
@@ -39,8 +39,11 @@ MOISTURE_PWR_PIN = 8
 
 #LED pins
 LED_PWR_PIN = 7
-LED_BLUE_PIN = 6
-LED_GREEN_PIN = 10
+LED_BLUE_PIN = 10
+LED_GREEN_PIN = 6
+LED_PWR = machine.Pin(LED_PWR_PIN, machine.Pin.OUT)
+LED_GREEN = PWM(Pin(LED_GREEN_PIN), freq=1000)
+LED_BLUE = PWM(Pin(LED_BLUE_PIN), freq=1000)
 
 SOIL_TEMP_PWR_PIN = 20
 SOIL_TEMP_DATA_PIN = 5
@@ -59,27 +62,37 @@ def connect_to_wifi(WIFI_SSID,WIFI_PASSWORD):
     wlan.active(False)
     time.sleep(1)
     wlan.active(True)
-    LED_PWR = machine.Pin(LED_PWR_PIN, machine.Pin.OUT)
-    LED_BLUE = machine.Pin(LED_BLUE_PIN, machine.Pin.OUT)
-    LED_BLUE.value(0)
- #   if not wlan.isconnected():
+    #LED_PWR = machine.Pin(LED_PWR_PIN, machine.Pin.OUT)
+    #LED_GREEN = PWM(Pin(LED_GREEN_PIN), freq=1000)
+    LED_GREEN.duty(1023)
+    LED_PWR.value(1)
+    #LED_BLUE = PWM(Pin(LED_BLUE_PIN), freq=1000)
     button_pin = machine.Pin(9, machine.Pin.IN)
     count = 0
     wlan.connect(WIFI_SSID, WIFI_PASSWORD)
+    
     while not wlan.isconnected():
         button_press = button_pin.value()
         count = count + 1
         print("Connecting to WiFi...")
-        LED_PWR.value(1)
-        time.sleep(0.5)
-        LED_PWR.value(0)
-        time.sleep(0.5)
+        fade_in(LED_BLUE)
+        fade_out(LED_BLUE)
         if button_press == 0 or (count > 30 and not wlan.isconnected()):
             enter_configuration_mode()
 
     wifi_solid()
     print("Connected to WiFi:", wlan.ifconfig())
-    
+
+def fade_in(led):
+    for duty_cycle in range(0, 1023, 25):  # Increase duty cycle in steps of 32
+        led.duty(duty_cycle)
+        time.sleep(0.025)
+        
+def fade_out(led):
+    for duty_cycle in range(1023, 0, -25):  # Decrease duty cycle in steps of 32
+        led.duty(duty_cycle)
+        time.sleep(0.025)
+
 def disconnect_from_wifi():
     wlan = network.WLAN(network.STA_IF)
     if wlan.isconnected():
@@ -157,6 +170,19 @@ def publish_humidity(client, humidity):
     # Publish the message multiple times with short intervals
     for _ in range(2):
         client.publish(MQTT_HUMIDITY_TOPIC, ujson.dumps(payload).encode('utf-8'), retain=True)
+        time.sleep(2.5)  # Adjust the delay as needed
+
+    return payload
+
+def publish_battery(client, battery):
+    
+    payload = {
+        "battery" : battery
+    }
+
+    # Publish the message multiple times with short intervals
+    for _ in range(2):
+        client.publish(MQTT_BATTERY_TOPIC, ujson.dumps(payload).encode('utf-8'), retain=True)
         time.sleep(2.5)  # Adjust the delay as needed
 
     return payload
@@ -264,6 +290,27 @@ def publish_humidity_discovery(client):
     }
     client.publish(topic, ujson.dumps(payload).encode('utf-8'), retain=True)
 
+def publish_battery_discovery(client):
+    topic = "homeassistant/sensor/battery_sensor/config"
+    payload = {
+        "name": "Battery Sensor",
+        "state_topic": "tele/sensor/battery_sensor/state",
+        "device_class": "battery",
+        "unit_of_measurement": "%",
+        "unique_id" : "54839_battery",
+        "value_template":"{{ value_json.battery}}",
+        "device": {
+            "identifiers": [
+                "Garden-Sensor"
+            ],
+            "manufacturer" : "Intellidwell",
+            "name" : "Garden Sensor",
+            "model" : "garden-sensor-v1"
+        },
+        "platform": "mqtt"
+    }
+    client.publish(topic, ujson.dumps(payload).encode('utf-8'), retain=True)
+
 def get_bootcount_prev():
     try:
         with open('boot_count_update.txt', 'r') as f:
@@ -341,6 +388,18 @@ def get_prev_humidity():
 def write_prev_humidity(humidity_prev):
     with open('humidity_prev.txt', 'w') as f:
         f.write(str(humidity_prev))
+
+def get_prev_battery():
+    try:
+        with open('battery_prev.txt', 'r') as f:
+            battery_prev = float(f.read())
+    except OSError:
+        battery_prev = 0
+    return battery_prev
+
+def write_prev_battery(battery_prev):
+    with open('battery_prev.txt', 'w') as f:
+        f.write(str(battery_prev))
         
         
 # AP configuration
@@ -364,7 +423,6 @@ def enter_configuration_mode():
     # Serve the configuration page
     serve_configuration_page()
 
-        
 def serve_configuration_page():
     # HTML code for the configuration page
     html_content = """<!DOCTYPE html>
@@ -412,9 +470,9 @@ def serve_configuration_page():
 
         
     print("Listening on", addr)
-    LED_PWR = machine.Pin(LED_PWR_PIN, machine.Pin.OUT)
-    LED_BLUE = machine.Pin(LED_BLUE_PIN, machine.Pin.OUT)
-    LED_BLUE.value(0)
+    #LED_PWR = machine.Pin(LED_PWR_PIN, machine.Pin.OUT)
+    #LED_BLUE = machine.Pin(LED_BLUE_PIN, machine.Pin.OUT)
+    LED_BLUE.duty(0)
     LED_PWR.value(1)
     
     while True:
@@ -530,18 +588,14 @@ def load_config_from_file():
         
 def wifi_solid():
     
-    LED_PWR = machine.Pin(LED_PWR_PIN, machine.Pin.OUT)
-    LED_GREEN = machine.Pin(LED_GREEN_PIN, machine.Pin.OUT)
-    LED_BLUE = machine.Pin(LED_BLUE_PIN, machine.Pin.OUT)
-    LED_BLUE.value(1)
-    LED_GREEN.value(0)
+    LED_BLUE.duty(1023)
+    LED_GREEN.duty(0)
     LED_PWR.value(1)
     
 def led_off():
     
-    LED_PWR = machine.Pin(LED_PWR_PIN, machine.Pin.OUT)
-    LED_BLUE = machine.Pin(LED_BLUE_PIN, machine.Pin.OUT)
-    LED_BLUE.value(0)
+    LED_BLUE.duty(1023)
+    LED_GREEN.duty(1023)
     LED_PWR.value(0)
     
 def get_soil_temp():
@@ -551,18 +605,50 @@ def get_soil_temp():
     
     ds_pin = machine.Pin(SOIL_TEMP_DATA_PIN)
     ds_sensor = ds18x20.DS18X20(onewire.OneWire(ds_pin))
-    ds_sensor.convert_temp()
+    #ds_sensor.convert_temp()
     time.sleep_ms(750)
     roms = ds_sensor.scan()
     for rom in roms:
         temp_value = ds_sensor.read_temp(rom)
         soil_temp_value = (temp_value * (9/5) + 32)
     return soil_temp_value
+
+def battery():
+    # Define the minimum and maximum voltage of the battery
+    min_voltage = 1.5  # Minimum voltage of the battery (0%)
+    max_voltage = 2.1  # Maximum voltage of the battery (100%)
+
+    # Define ADC reference voltage and maximum ADC value
+    #adc_ref_voltage = 3.3  # ADC reference voltage
+    adc_ref_voltage = 2.86
+    max_adc_value = 4095   # Maximum ADC value (12-bit ADC)
     
+    #uart = machine.UART(0, baudrate=115200)
+    adc = ADC(Pin(2))  # Define ADC pin (A0 in Arduino)
+    adc.atten(ADC.ATTN_11DB)  # Set attenuation to 11dB
+    adc_value = adc.read()
+    battery_voltage = adc_value * adc_ref_voltage / max_adc_value
+    percentage = ((battery_voltage - min_voltage) / (max_voltage - min_voltage)) * 100
+    #Vbatt = 0
+    #for i in range(16):
+     #   Vbatt += adc.read()  # Read ADC value
+    #Vbatt = adc.read()
+    #Vbattf = 2 * Vbatt / 16 / 1000.0  # Convert to voltage (mV to V)
+    #uart.write("%.3f\r\n" % Vbattf)  # Send voltage value over UART
+    time.sleep(1)
+    percentage = min(max(percentage, 0), 100)
+    
+    return percentage
+    #return adc_value
+            
 def main():
     button_pin = machine.Pin(9, machine.Pin.IN)
     config_data = load_config_from_file()
-    LED_PWR = machine.Pin(LED_PWR_PIN, machine.Pin.OUT)
+    LED_PWR.value(0)
+    LED_BLUE.duty(1023)
+    LED_GREEN.duty(1023)
+   # LED_PWR = machine.Pin(LED_PWR_PIN, machine.Pin.OUT)
+   # LED_GREEN = PWM(Pin(LED_GREEN_PIN), freq=1000)
     WIFI_SSID = config_data.get("WIFI_SSID", "")
     WIFI_PASSWORD = config_data.get("WIFI_PASSWORD", "")
     MQTT_BROKER = config_data.get("MQTT_BROKER", "")
@@ -616,12 +702,12 @@ def main():
         
         
         # Light
-        light_percentage_previous = get_prev_light()
-        print("Initial Light Percentage:", light_percentage_previous, " %")
-        current_light = read_light()
-        normalized_light_value = current_light / 4095
-        light_percentage_current = round(normalized_light_value *100, 2)
-        print("Current Light Percentage:", light_percentage_current, " %")
+     #   light_percentage_previous = get_prev_light()
+     #   print("Initial Light Percentage:", light_percentage_previous, " %")
+     #   current_light = read_light()
+     #   normalized_light_value = current_light / 4095
+     #   light_percentage_current = round(normalized_light_value *100, 2)
+     #   print("Current Light Percentage:", light_percentage_current, " %")
         
         #Air Temp
         air_temp_previous = get_prev_air_temp()
@@ -643,11 +729,17 @@ def main():
         #Soil Temperature
         #light_percentage_previous = get_prev_light()
         #print("Initial Light Percentage:", light_percentage_previous, " %")
-        current_soil_temp = get_soil_temp()
+        #current_soil_temp = get_soil_temp()
         #normalized_light_value = current_light / 4095
         #light_percentage_current = round(normalized_light_value *100, 2)
         #print("Current Light Percentage:", light_percentage_current, " %")
-        print("Current Soil Temperature:", current_soil_temp, " °F")
+        #print("Current Soil Temperature:", current_soil_temp, " °F")
+        
+        #Battery
+        battery_previous = get_prev_battery()
+        print("Initial Battery Percentage: ", battery_previous, " %")
+        battery_current = battery()
+        print("Current Battery Percentage is: ", battery_current," %")
         
         if tracker >= min_update or abs(moisture_percentage_current - moisture_percentage_previous) >= (3):
             print("Updating Server...")
@@ -660,44 +752,40 @@ def main():
             #MQTT Moisture Messages
             publish_discovery(client)
             count = 0
+            print('Publishing moisture sensor discovery message to MQTT server...')
             while True:
-                print('Publishing moisture sensor discovery message to MQTT server...')
                 count = count + 1
-                LED_PWR.value(0)
-                time.sleep(0.5)
-                LED_PWR.value(1)
-                time.sleep(0.5)
-                if count > 3:
+                fade_in(LED_GREEN)
+                fade_out(LED_GREEN)
+                if count > 2:
                     break
             print('Publishing moisture sensor value to MQTT server...')
             payload = publish_moisture(client, moisture_percentage_current)
             
             #MQTT Light Messages
-            publish_light_discovery(client)
-            count = 0
-            while True:
-                print('Publishing light sensor discovery message to MQTT server...')
-                count = count + 1
-                LED_PWR.value(0)
-                time.sleep(0.5)
-                LED_PWR.value(1)
-                time.sleep(0.5)
-                if count > 3:
-                    break
-            print('Publishing light sensor value to MQTT server...')
-            payload = publish_light(client, light_percentage_current)
+           # publish_light_discovery(client)
+           # count = 0
+           # while True:
+           #     print('Publishing light sensor discovery message to MQTT server...')
+           #     count = count + 1
+           #     LED_PWR.value(0)
+           #     time.sleep(0.5)
+           #     LED_PWR.value(1)
+           #     time.sleep(0.5)
+           #     if count > 3:
+           #         break
+           # print('Publishing light sensor value to MQTT server...')
+           # payload = publish_light(client, light_percentage_current)
             
             #MQTT Air_Temp Messages
             publish_air_temp_discovery(client)
             count = 0
+            print('Publishing Air Temperature discovery message to MQTT server...')
             while True:
-                print('Publishing Air Temperature discovery message to MQTT server...')
                 count = count + 1
-                LED_PWR.value(0)
-                time.sleep(0.5)
-                LED_PWR.value(1)
-                time.sleep(0.5)
-                if count > 3:
+                fade_in(LED_GREEN)
+                fade_out(LED_GREEN)
+                if count > 2:
                     break
             print('Publishing air temperature sensor value to MQTT server...')
             payload = publish_air_temp(client, air_temp_current)
@@ -705,24 +793,35 @@ def main():
             #MQTT Air_Hum Messages
             publish_humidity_discovery(client)
             count = 0
+            print('Publishing humidity sensor discovery message to MQTT server...')
             while True:
-                print('Publishing humidity sensor discovery message to MQTT server...')
                 count = count + 1
-                LED_PWR.value(0)
-                time.sleep(0.5)
-                LED_PWR.value(1)
-                time.sleep(0.5)
-                if count > 3:
+                fade_in(LED_GREEN)
+                fade_out(LED_GREEN)
+                if count > 2:
                     break
             print('Publishing humidity sensor value to MQTT server...')
             payload = publish_humidity(client, humidity_current) 
-
+            
+            #MQTT Battery Messages
+            publish_battery_discovery(client)
+            count = 0
+            print('Publishing battery sensor discovery message to MQTT server...')
+            while True:
+                count = count + 1
+                fade_in(LED_GREEN)
+                fade_out(LED_GREEN)
+                if count > 2:
+                    break
+            print('Publishing battery percentage to MQTT server...')
+            payload = publish_battery(client, battery_current) 
             #Write sensor values to memory
             
             write_prev(moisture_percentage_current)
-            write_prev_light(light_percentage_current)
+            #write_prev_light(light_percentage_current)
             write_prev_air_temp(air_temp_current)
             write_prev_humidity(humidity_current)
+            write_prev_battery(battery_current)
             
             save_boot_count(boot_count)
             client.disconnect()
